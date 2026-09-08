@@ -3,9 +3,9 @@
 
 \input{preamble}
 
-\title{vLLM Tutorial}
+\title{MLSS 2026 Tutorial}
 \subtitle{Efficient LLM Inference and Serving}
-\author{Alexander Conzelmann}
+\author{Alexander Conzelmann and Shiwei Liu}
 \date{\today}
 % \institute{}
 
@@ -167,6 +167,10 @@ in parallel you can batch together.
 % \end{frame}
 
 \begin{frame}[standout]
+  DEMO
+\end{frame}
+
+\begin{frame}[standout]
   Speculative Decoding \\ \small How to speed up our model (almost) for free
 \end{frame}
 
@@ -195,7 +199,7 @@ in parallel you can batch together.
 where $T_v$ = verifier forward-pass time, $T_d$ = drafter forward-pass time
 
 \textbf{Expected tokens per round.} With per-position acceptance rate $\alpha_j$: 
-$$E[\text{tokens/round}] = 1 + \sum_{i=1}^\gamma \prod_{j=1}^i \alpha_j \stackrel{\text{if} \alpha_j = \alpha \forall j}{=} \frac{1-\alpha^{\gamma+1}}{1-\alpha}$$
+$$E[\text{tokens/round}] = 1 + \sum_{i=1}^\gamma \prod_{j=1}^i \alpha_j \stackrel{\text{if} \alpha_j = \alpha \forall j}{=} 1 + \sum_{i=1}^\gamma \alpha^i = \frac{1-\alpha^{\gamma+1}}{1-\alpha}$$
 
 \textbf{Speedup} vs.\ plain autoregressive decoding (1 token every $T_v$):
 \[
@@ -248,6 +252,10 @@ $$E[\text{tokens/round}] = 1 + \sum_{i=1}^\gamma \prod_{j=1}^i \alpha_j \stackre
 
   \textbf{Diffusion.} All $\gamma$ tokens in a single bidirectional pass: $\gamma T_d \to T_d$, so the
   term that created the interior optimum in $\gamma$ disappears.
+\end{frame}
+
+\begin{frame}[standout]
+  DEMO
 \end{frame}
 
 \begin{frame}[standout]
