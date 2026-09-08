@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Run on your LAPTOP. Submits (or reattaches to) a Jupyter session on MPI for
+# the vLLM tutorial, then tunnels it to localhost.
+#
+#   ./scripts/jupyter/mpi-jupyter          # start or reattach
+#   ./scripts/jupyter/mpi-jupyter --stop   # end the session
+#   ./scripts/jupyter/mpi-jupyter --sync   # push local changes, then start
+
+set -euo pipefail
+
+HOST="${MPI_HOST:-mpi-rsync}"
+REPO_DIR="${MPI_REPO_DIR:-/lustre/home/aconzelmann/vllm-tutorial}"
+LOCAL_PORT="${MPI_LOCAL_PORT:-8888}"
+BID="${MPI_BID:-50}"
+LOCAL_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+remote() {
+  ssh -o ControlMaster=auto -o ControlPath=~/.ssh/cm-mpi-jup -o ControlPersist=10m "$HOST" "$@"
+}
+
+running_id() {
+  remote "condor_q \$(whoami) -constraint 'JobBatchName == \"jupyter\"' -af ClusterId ProcId 2>/dev/null | head -n1 | tr ' ' '.'"
+}
+
+case "${1:-}" in
+  --stop)
+    id=$(running_id)
+    [[ -z "$id" ]] && { echo "No session running."; exit 0; }
+    remote "condor_rm $id" && echo "Removed $id"
+    exit 0
+    ;;
+  --sync)
+    echo "Syncing $LOCAL_REPO -> $HOST:$REPO_DIR"
+    rsync -av --exclude .jupyter --exclude .venv --exclude slides/build \
+      "$LOCAL_REPO/" "$HOST:$REPO_DIR/"
+    ;;
+esac
+
+id=$(running_id)
+if [[ -z "$id" ]]; then
+  echo "Submitting Jupyter job (bid $BID)..."
+  remote "cd $REPO_DIR && mkdir -p .jupyter && condor_submit_bid $BID scripts/jupyter/jupyter.sub -batch-name jupyter"
+  echo "Waiting for the scheduler to place the job..."
+  for _ in $(seq 1 120); do
+    id=$(running_id); [[ -n "$id" ]] && break
+    sleep 5
+  done
+  [[ -z "$id" ]] && { echo "Job never appeared in the queue."; exit 1; }
+fi
+
+echo "Session $id -- waiting for the server to come up..."
+info=""
+for _ in $(seq 1 180); do
+  info=$(remote "cat $REPO_DIR/.jupyter/session-$id.env 2>/dev/null" || true)
+  [[ -n "$info" ]] && break
+  sleep 5
+done
+[[ -z "$info" ]] && {
+  echo "Timed out. Check: ssh $HOST 'tail $REPO_DIR/.jupyter/jupyter_$id.err'"
+  exit 1
+}
+
+eval "$info"
+echo
+echo "  Node: $NODE"
+echo "  URL:  http://localhost:${LOCAL_PORT}/lab?token=${TOKEN}"
+echo
+echo "Tunnel open. Ctrl-C closes it; the job keeps running (--stop to kill)."
+exec ssh -N -L "${LOCAL_PORT}:${NODE}:${PORT}" "$HOST"

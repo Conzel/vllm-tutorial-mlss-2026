@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 300" width="1000" height="300"
+     font-family="'Fira Sans','Helvetica Neue',Arial,sans-serif">
+  <style>
+    .lvl   { rx:4; stroke:#23373B; stroke-opacity:.35; stroke-width:1; }
+    .lbl   { font-size:12.5px; }
+    .b     { font-weight:600; }
+    .note  { font-size:11px; fill:#23373B; fill-opacity:.78; }
+    .noteh { font-size:11px; font-weight:600; fill:#23373B; }
+    .axis  { font-size:10px; fill:#23373B; fill-opacity:.6; }
+  </style>
+
+  <!-- capacity / latency / bandwidth gradient arrow -->
+  <line x1="132" y1="26" x2="132" y2="272" stroke="#23373B" stroke-opacity=".45" stroke-width="1.4"/>
+  <path d="M132 278 l-4.5 -9 h9 z" fill="#23373B" fill-opacity=".45"/>
+  <text class="axis" transform="translate(122,150) rotate(-90)" text-anchor="middle">
+    capacity &#8593;    latency &#8593;    bandwidth &#8595;
+  </text>
+
+  <!-- levels -->
+  <rect class="lvl" x="284" y="20"  width="193" height="34" fill="#E8743B"/>
+  <text class="lbl" x="380" y="42" text-anchor="middle" fill="#FFFFFF">
+    <tspan class="b">Registers</tspan>  |  256 KB/SM  |  ~100 TB/s
+  </text>
+
+  <rect class="lvl" x="251" y="66"  width="258" height="34" fill="#F5C0A7"/>
+  <text class="lbl" x="380" y="88" text-anchor="middle" fill="#23373B">
+    <tspan class="b">L1 / Shared Memory</tspan>  |  192 KB/SM  |  ~19 TB/s
+  </text>
+
+  <rect class="lvl" x="219" y="112" width="322" height="34" fill="#B5D0DC"/>
+  <text class="lbl" x="380" y="134" text-anchor="middle" fill="#23373B">
+    <tspan class="b">L2 Cache</tspan>  |  40 MB chip-wide  |  ~5 TB/s
+  </text>
+
+  <rect class="lvl" x="187" y="158" width="386" height="34" fill="#6BA2B9"/>
+  <text class="lbl" x="380" y="180" text-anchor="middle" fill="#FFFFFF">
+    <tspan class="b">HBM2e &#8212; global memory</tspan>  |  80 GB  |  <tspan class="b">2039 GB/s</tspan>
+  </text>
+
+  <rect class="lvl" x="155" y="226" width="451" height="34" fill="#EDEFEF"
+        stroke-dasharray="4 3"/>
+  <text class="lbl" x="380" y="248" text-anchor="middle" fill="#23373B">
+    <tspan class="b">Off-chip</tspan>  |  NVLink 600 GB/s  |  PCIe 4.0 64 GB/s  |  host DRAM
+  </text>
+
+  <!-- annotations -->
+  <path d="M625 20 q-6 0 -6 6 v18 q0 6 -6 6 q6 0 6 6 v18 q0 6 6 6"
+        fill="none" stroke="#23373B" stroke-opacity=".45" stroke-width="1.2"/>
+  <text class="noteh" x="640" y="38">Where reuse happens.</text>
+  <text class="note"  x="640" y="54">A tile is hoisted up once and multiplied
+    <tspan x="640" dy="14">many times. Arithmetic intensity counts</tspan>
+    <tspan x="640" dy="14">exactly this: FLOPs per byte out of HBM.</tspan>
+  </text>
+
+  <path d="M625 158 q-6 0 -6 6 v5 q0 6 -6 6 q6 0 6 6 v5 q0 6 6 6"
+        fill="none" stroke="#23373B" stroke-opacity=".45" stroke-width="1.2"/>
+  <text class="noteh" x="640" y="170">Where the model lives.</text>
+  <text class="note"  x="640" y="186">8 GB of weights + the KV cache.
+    <tspan x="640" dy="14">Every decode step re-reads all of it.</tspan>
+  </text>
+</svg>

@@ -1,0 +1,29 @@
+# HTCondor submit description for an interactive Jupyter session on MPI.
+# Submit from the login node:
+#
+#   condor_submit_bid 25 jupyter.sub -batch-name jupyter
+#
+# The tutorial notebooks use Qwen2.5-0.5B, so one A100 is plenty; bid 25 is the
+# A100 minimum. Raise to 35 and require H100 for the larger-model exercises.
+
+universe     = vanilla
+# Run from the repo root so the .jupyter/ paths below (and the session file
+# the job writes) all resolve against REPO_DIR, not the submit directory.
+initialdir   = /lustre/home/aconzelmann/vllm-tutorial
+
+request_cpus   = 4
+request_gpus   = 1
+request_memory = 32GB
+request_disk   = 40GB
+requirements   = regexp("A100|H100", TARGET.GPUs_DeviceName)
+
+# VENV lives on /fast: the home directory quota is far too small for torch+vllm.
+environment = "JOB_ID=$(ClusterId).$(ProcId) REPO_DIR=/lustre/home/aconzelmann/vllm-tutorial VENV=/fast/aconzelmann/vllm-tutorial/venv HF_HOME=/fast/aconzelmann/hf_home"
+
+output = .jupyter/jupyter_$(ClusterId).$(ProcId).out
+error  = .jupyter/jupyter_$(ClusterId).$(ProcId).err
+log    = .jupyter/jupyter_$(ClusterId).$(ProcId).log
+
+notification = Error
+
+queue 1

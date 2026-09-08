@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Pre-download every model the tutorial notebooks use.
+#
+# Compute nodes run with HF_HUB_OFFLINE=1 and have no internet (see
+# jupyter_job.sh), so a model that is not already in $HF_HOME cannot be fetched
+# from a notebook -- it fails with a LocalEntryNotFoundError mid-workshop.
+# Run this once, ahead of time, from the login node (which does have internet).
+#
+#   ./scripts/prefetch-models           # run it on the login node over ssh
+#   ./scripts/prefetch-models --local   # run here (already on the login node)
+#   ./scripts/prefetch-models --check   # only report what is cached
+#
+# Configuration (same defaults as jupyter.sub):
+#   MPI_HOST      ssh host for the login node   (default: mpi-rsync)
+#   MPI_HF_HOME   model cache on /fast          (default: /fast/aconzelmann/hf_home)
+#   MPI_VENV      venv holding huggingface_hub  (default: /fast/aconzelmann/vllm-tutorial/venv)
+
+set -euo pipefail
+
+HOST="${MPI_HOST:-mpi-rsync}"
+HF_HOME_DIR="${MPI_HF_HOME:-/fast/aconzelmann/hf_home}"
+VENV="${MPI_VENV:-/fast/aconzelmann/vllm-tutorial/venv}"
+
+# Every model id the notebooks load. Keep this in sync with them.
+MODELS=(
+  "Qwen/Qwen2.5-0.5B-Instruct"   # 01 (engine), 02 (drafter)
+  "Qwen/Qwen2.5-1.5B-Instruct"   # 02 (verifier)
+)
+
+MODE="remote"
+CHECK_ONLY="0"
+for arg in "$@"; do
+  case "$arg" in
+    --local) MODE="local" ;;
+    --check) CHECK_ONLY="1" ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+
+# The worker that actually talks to the Hub. Reads model ids as argv.
+read -r -d '' PY_PROG <<'PY' || true
+import os
+import sys
+
+from huggingface_hub import snapshot_download
+
+check_only = os.environ.get("CHECK_ONLY") == "1"
+missing = []
+
+for model in sys.argv[1:]:
+    try:
+        path = snapshot_download(
+            model,
+            local_files_only=True,
+            # weights ship as safetensors; skip duplicate//legacy formats
+            ignore_patterns=["*.pth", "*.h5", "*.msgpack", "original/*"],
+        )
+        print(f"  cached   {model}\n           {path}")
+        continue
+    except Exception:
+        pass
+
+    if check_only:
+        print(f"  MISSING  {model}")
+        missing.append(model)
+        continue
+
+    print(f"  fetching {model} ...", flush=True)
+    path = snapshot_download(
+        model,
+        ignore_patterns=["*.pth", "*.h5", "*.msgpack", "original/*"],
+    )
+    print(f"  done     {path}")
+
+if missing:
+    print(f"\n{len(missing)} model(s) missing. Run without --check to download them.")
+    sys.exit(1)
+PY
+
+run_here() {
+  local python="$VENV/bin/python"
+  [[ -x "$python" ]] || python="$(command -v python3)"
+  echo "HF_HOME=$HF_HOME_DIR"
+  echo "python=$python"
+  mkdir -p "$HF_HOME_DIR"
+  HF_HOME="$HF_HOME_DIR" HF_HUB_OFFLINE=0 CHECK_ONLY="$CHECK_ONLY" \
+    "$python" -c "$PY_PROG" "${MODELS[@]}"
+  echo
+  du -sh "$HF_HOME_DIR" 2>/dev/null || true
+}
+
+if [[ "$MODE" == "local" ]]; then
+  run_here
+else
+  echo "Running on $HOST ..."
+  # The program goes over stdin ("python - <args>") so no quoting of its body
+  # is needed on the remote side.
+  ssh -o ControlMaster=auto -o ControlPath=~/.ssh/cm-mpi-jup -o ControlPersist=10m "$HOST" \
+    "export HF_HOME='$HF_HOME_DIR' HF_HUB_OFFLINE=0 CHECK_ONLY='$CHECK_ONLY'
+     mkdir -p '$HF_HOME_DIR'
+     if [ -x '$VENV/bin/python' ]; then P='$VENV/bin/python'; else P=python3; fi
+     echo \"HF_HOME=\$HF_HOME\"; echo \"python=\$P\"
+     \"\$P\" - ${MODELS[*]}
+     du -sh '$HF_HOME_DIR'" <<< "$PY_PROG"
+fi

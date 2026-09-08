@@ -1,0 +1,52 @@
+% ---------------------------------------------------------------------------
+% GPU memory hierarchy (A100 SXM 80GB) -- motivates the roofline frame
+% ---------------------------------------------------------------------------
+\begin{frame}{The GPU Memory Hierarchy}
+  \vspace{-0.4em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+      font=\scriptsize,
+      lvl/.style={
+        draw=ink!35, line width=0.5pt, rounded corners=2.5pt,
+        minimum height=0.82cm, text=ink, align=center, inner sep=2pt},
+      note/.style={text width=3.5cm, align=left, font=\scriptsize, text=ink!75},
+      brc/.style={decorate, decoration={brace, amplitude=4pt}, draw=ink!45},
+    ]
+
+    % ---- the levels -------------------------------------------------------
+    \node[lvl, minimum width=4.2cm, fill=accentalt!85, text=white] (reg)  at (0, 0.0)
+      {\textbf{Registers} \;\textbar\; 256\,KB/SM \;\textbar\; $\sim$100\,TB/s};
+    \node[lvl, minimum width=5.6cm, fill=accentalt!45] (smem) at (0,-1.0)
+      {\textbf{L1 / Shared Memory} \;\textbar\; 192\,KB/SM \;\textbar\; $\sim$19\,TB/s};
+    \node[lvl, minimum width=7.0cm, fill=accent!35] (l2)   at (0,-2.0)
+      {\textbf{L2 Cache} \;\textbar\; 40\,MB (chip-wide) \;\textbar\; $\sim$5\,TB/s};
+    \node[lvl, minimum width=8.4cm, fill=accent!70, text=white] (hbm)  at (0,-3.0)
+      {\textbf{HBM2e -- global memory} \;\textbar\; 80\,GB \;\textbar\; \textbf{2039\,GB/s}};
+    \node[lvl, minimum width=9.8cm, fill=ink!8, draw=ink!25, dashed] (off) at (0,-4.15)
+      {\textbf{Off-chip} \;\textbar\; NVLink 600\,GB/s \;\textbar\; PCIe\,4.0 64\,GB/s \;\textbar\; host DRAM};
+
+    % ---- left gradient arrow ---------------------------------------------
+    \draw[-{Stealth[length=4pt]}, ink!45, line width=0.8pt]
+      (-5.35, 0.45) -- (-5.35,-4.6);
+    \node[rotate=90, anchor=south, font=\tiny, text=ink!60] at (-5.5,-2.0)
+      {capacity $\uparrow$ \quad latency $\uparrow$ \quad bandwidth $\downarrow$};
+
+    % ---- right annotations ------------------------------------------------
+    \draw[brc] (5.25, 0.42) -- (5.25,-1.42);
+    \node[note, anchor=west] at (5.6,-0.5)
+      {\textbf{Where reuse happens.} Data is pulled here and multiplied many times.
+       Arithmetic intensity counts exactly this: FLOPs per byte lifted out of HBM.};
+
+    \draw[brc] (5.25,-2.62) -- (5.25,-3.42);
+    \node[note, anchor=west] at (5.6,-3.02)
+      {\textbf{Where the model lives.} 8\,GB of weights $+$ the KV cache.
+       Every decode step re-reads all of it.};
+
+  \end{tikzpicture}}
+  \end{center}
+
+  \vspace{-0.2em}
+  Only the bottom level is big enough to hold the model, but it is very slow. 
+  For matrix multiplications, the weight matrices need to be pulled into higher GPU memory levels.
+\end{frame}

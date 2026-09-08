@@ -1,0 +1,462 @@
+% !TeX program = lualatex
+\documentclass[aspectratio=169, 11pt]{beamer}
+
+\input{preamble}
+
+\title{vLLM Tutorial}
+\subtitle{Efficient LLM Inference and Serving}
+\author{Alexander Conzelmann}
+\date{\today}
+% \institute{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{Outline}
+  \textbf{Goal:} Get practical intuition on how GPUs work and how to use vLLM. 
+  \begin{itemize}
+    \item Prefill vs Decode: GPU memory efficiency 
+    \item Speculative Decoding: Speeding up inference losslessly
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[standout]
+  Prefill versus Decode \\ \small How GPUs handle memory and computation
+\end{frame}
+
+\begin{frame}{Two Distinct Stages in LLM Inference}
+Due to KV-caching, inference can be separated into \textbf{Prefill} and \textbf{Decoding}. Let us assume
+we are working on a single prompt at a time:
+%These stages have
+
+\textbf{Prefill.} The tokenized user prompt $P = s_1 s_2 \ldots s_m$ is processed. Output is the next token 
+$\hat{s}_{m+1}$ plus per-layer $l$ and per-token $k$ KV cache values $K_{l,k}, V_{l,k}$.
+
+Operations on hidden states $X$, such as  calculating $Q,K,V$ values are $(m, d) \times (d,d)$.
+
+\textbf{Decode.} We calculate one output token using the previous prompts' cached KV values. 
+
+Operations on hidden states $x$, such as  calculating $Q,K,V$ values are $({\color{red}1}, d) \times (d,d)$.
+\end{frame}
+
+% Insert after "Two Distinct Stages in LLM Inference"
+\begin{frame}{What Actually Gets Computed}
+Per layer, on hidden states $X$, with $W_Q \in \mathbb{R}^{d \times H_q h}$, $W_K, W_V \in \mathbb{R}^{d \times H_{kv} h}$:
+\[
+  Q = X W_Q, \quad K = X W_K, \quad V = X W_V,
+  \qquad
+  \mathrm{Attn}(Q,K,V) = \mathrm{softmax}\!\left(\frac{QK^\top}{\sqrt{h}}\right) V
+\]
+In prefill $X \in \mathbb{R}^{m \times d}$. In decode $X = x \in \mathbb{R}^{{\color{red}1} \times d}$, and $K, V$ are the
+cached ones with the single new row appended.
+
+\end{frame}
+
+\begin{frame}{What Actually Gets Computed}
+\vspace{0.3em}
+\textbf{Qwen3-4B:} $d = 2560$, $L = 36$ layers, $H_q = 32$ query heads, $H_{kv} = 8$ KV heads,
+head dim $h = 128$, $d_{ff} = 9728$.
+
+\vspace{0.3em}
+\begin{table}
+\centering
+\footnotesize
+\begin{tabular}{lcc}
+\toprule
+per layer & \textbf{Prefill} ($m$ tokens) & \textbf{Decode} (1 token, cache $m$) \\
+\midrule
+$Q$ proj            & $(m,d)\times(d,H_q h)$    & $({\color{red}1},d)\times(d,H_q h)$ \\
+$K,V$ proj          & $(m,d)\times(d,H_{kv}h)$  & $({\color{red}1},d)\times(d,H_{kv}h)$ \\
+scores $QK^\top$    & $(m,h)\times(h,m)$        & $({\color{red}1},h)\times(h,m)$ \\
+$\mathrm{softmax}\cdot V$ & $(m,m)\times(m,h)$  & $({\color{red}1},m)\times(m,h)$ \\
+MLP                 & $(m,d)\times(d,d_{ff})$   & $({\color{red}1},d)\times(d,d_{ff})$ \\
+\midrule
+FLOPs               & $\mathcal{O}(m d^2 + m^2 d)$ & $\mathcal{O}(d^2 + m d)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+\textbf{Problem:} The cache removes the compute, but not the weight reads. Every matrix on the right
+still has to be pulled from HBM in full, to be multiplied against a single row.
+\end{frame}
+
+\input{sections/gpu-memory-hierarchy}
+
+\begin{frame}{Roofline Model: Compute- vs Memory-Bound}
+A GPU operation is bound by whichever resource runs out first: \textbf{compute} (FLOPs/s)
+or \textbf{memory bandwidth} (bytes/s). The relevant quantity is \textbf{arithmetic intensity}:
+\[
+  \text{AI} = \frac{\text{FLOPs}}{\text{Bytes moved from HBM}} \quad \left[\frac{\text{FLOP}}{\text{byte}}\right]
+\]
+Achieved throughput is capped by the \textbf{roofline}:
+\[
+  \text{Achieved FLOP/s} = \min\big(\text{Peak Compute},\ \text{AI} \times \text{Memory Bandwidth}\big)
+\]
+The \textbf{ridge point} is where the two terms are equal --- below it, you are memory-bound
+no matter how fast your cores are.
+
+\vspace{0.5em}
+\textbf{Reference GPU (A100 SXM 80GB, FP16 tensor cores):}
+\[
+  \text{Peak Compute} = 312~\text{TFLOP/s}, \quad
+  \text{Bandwidth} = 2039~\text{GB/s}
+  \ \Rightarrow\ \text{Ridge} \approx 153~\tfrac{\text{FLOP}}{\text{byte}}
+\]
+Any matmul with AI below $153$ leaves compute cores idle, waiting on HBM.
+\end{frame}
+
+\begin{frame}{Why Decoding is Slow}
+Take one linear projection of \textbf{Qwen3-4B}: $d = 2560$ 
+
+\vspace{0.3em}
+\begin{table}
+\centering
+\small
+\begin{tabular}{lcc}
+\hline
+ & \textbf{Decode} $(1,d)\times(d,d)$ & \textbf{Prefill} $(m{=}512,d)\times(d,d)$ \\
+\hline
+FLOPs & $2d^2 \approx 13.1$ MFLOP & $2md^2 \approx 6.7$ GFLOP \\
+Bytes moved (weights) & $2d^2 \approx 13.1$ MB & $2d^2 \approx 13.1$ MB \\
+Arithmetic Intensity & $\mathbf{1}$ FLOP/byte & $\mathbf{512}$ FLOP/byte \\
+Achieved throughput & $2.0$ TFLOP/s & $312$ TFLOP/s \\
+GPU utilization & $\mathbf{0.65\%}$ & $\mathbf{100\%}$ \\
+\hline
+\end{tabular}
+\end{table}
+
+$\implies$ during decoding, the GPUs sit almost completely idle.
+
+\textbf{Batching} can help, but only if you have multiple requests 
+in parallel you can batch together.
+\end{frame}
+
+
+% Insert after "Why Decoding is Slow"
+% \begin{frame}{Where the Bytes Come From}
+% A decode step reads two things: \textbf{all weights} and \textbf{the entire KV cache}.
+%  
+% \textbf{Weights.} $4$B params in FP16 $=8$ GB, independent of $m$.
+%  
+% \textbf{KV cache.} Per token: $2 L H_{kv} h \cdot 2\,\mathrm{B} = 2\cdot36\cdot8\cdot128\cdot2 \approx 147$ KB.
+% At $m = 8192$: $\approx 1.2$ GB --- and it grows every step.
+%  
+% \vspace{0.3em}
+% \begin{table}
+% \centering
+% \small
+% \begin{tabular}{lccc}
+% \toprule
+% & \textbf{FLOPs} & \textbf{Bytes} & \textbf{AI} \\
+% \midrule
+% weight matmuls ($N$ params) & $2N$            & $2N$              & $1$ \\
+% attention over cache        & $4 m L H_q h$   & $4 m L H_{kv} h$  & $H_q / H_{kv} = 4$ \\
+% \bottomrule
+% \end{tabular}
+% \end{table}
+%  
+% Both sit far below the ridge point of $153$; note the attention AI is $m$-independent, GQA is the only
+% thing lifting it above $1$.
+% \[
+%   T_{\text{step}} \geq \frac{(8 + 1.2)~\text{GB}}{2039~\text{GB/s}} \approx 4.5~\text{ms}
+%   \quad\Rightarrow\quad \approx 220~\text{tok/s ceiling}
+% \]
+%  
+% \textbf{Batching only fixes half of it.} $B$ requests share the weights (AI $\to B$), but each carries its
+% own cache: attention AI stays at $4$ and cache traffic scales with $B$.
+% \end{frame}
+
+\begin{frame}[standout]
+  Speculative Decoding \\ \small How to speed up our model (almost) for free
+\end{frame}
+
+\begin{frame}{Speculative Decoding}
+  % Sometimes, you cannot batch requests together (i.e. local, offline LLMs). One way to improve arithmetic intensity during decoding
+  \textbf{Idea.} A cheap model (drafter) predicts tokens, original LLM (verifier) confirms tokens. 
+
+  During decoding, drafter produces $b$ proposal tokens $\hat{s}_{m+1}, \hat{s}_{m+2}, \ldots, \hat{s}_{m+b}$. 
+  Verifier then batches the proposal tokens together to determine logits at each proposal position.
+
+  Where top-1 logit agrees with proposal: accept token, else reject. After the first rejected position, 
+  the full draft is thrown away 
+  $\implies$ the verifiers probability distribution is unaltered (lossless speedup).
+
+\end{frame}
+
+\begin{frame}{Why does speculative decoding speed up inference?}
+  Roofline argument: in memory-bound regime, processing $M$ tokens is roughly as expensive as processing $1$ token
+  {\color{gray}(until cross-over: so $M_{\text{cross}} \approx 153$ on the A100)}.
+  % Sometimes, you cannot batch requests together (i.e. local, offline LLMs). One way to improve arithmetic intensity during decoding
+
+\textbf{Per-round timing.}
+\[
+  T_{\text{round}} = \gamma T_d + T_v
+\]
+where $T_v$ = verifier forward-pass time, $T_d$ = drafter forward-pass time
+
+\textbf{Expected tokens per round.} With per-position acceptance rate $\alpha_j$: 
+$$E[\text{tokens/round}] = 1 + \sum_{i=1}^\gamma \prod_{j=1}^i \alpha_j \stackrel{\text{if} \alpha_j = \alpha \forall j}{=} \frac{1-\alpha^{\gamma+1}}{1-\alpha}$$
+
+\textbf{Speedup} vs.\ plain autoregressive decoding (1 token every $T_v$):
+\[
+  \boxed{\text{Speedup} = \frac{T_v}{\gamma T_d + T_v}\cdot\frac{1-\alpha^{\gamma+1}}{1-\alpha}}
+\]
+\end{frame}
+
+\begin{frame}{N-Gram Speculation}
+  \textbf{Idea.} Take the last $n$ tokens, search for the same $n$-gram
+  earlier in prompt $+$ generation, propose the $\gamma$ tokens that followed it there.
+  Verification is unchanged $\implies$ still lossless.
+
+  \textbf{Cost.} String lookup is almost free: $T_d \approx 0$.
+  \[
+    \text{Speedup} = \frac{T_v}{\gamma T_d + T_v}\cdot\frac{1-\alpha^{\gamma+1}}{1-\alpha}
+    \quad\xrightarrow{\ T_d \to 0\ }\quad
+    \frac{1-\alpha^{\gamma+1}}{1-\alpha}
+  \]
+  $\implies$ no interior optimum in $\gamma$ any more; only the verifier batch approaching
+  $M_{\text{cross}}$ still limits it.
+
+  \textbf{Where it helps.} $\alpha$ is purely lexical: a draft is right only if the continuation
+  \emph{literally} stands in the context. Chat: $\alpha \approx 0$.
+  Summarization, RAG, code edits: high.
+
+  \textbf{Free:} no second model, no weights in HBM, no shared tokenizer, no training.
+\end{frame}
+
+\begin{frame}{Other Drafters}
+  In principal, we can use any method that calculates new possible tokens given previous text 
+  and possibly verifier information like hidden states. Popular methods:
+
+  \begin{table}
+  \centering
+  \small
+  \begin{tabular}{lccc}
+  \toprule
+  \textbf{Drafter} & $T_d$ & $\alpha$ & \textbf{needs training} \\
+  \midrule
+  standalone model    & $0.1$--$0.2\,T_v$        & moderate       & \xmark \\
+  EAGLE / Medusa head & $\ll T_v$                & high           & \cmark \\
+  Diffusion LM        & one pass for all $\gamma$ & moderate      & \cmark \\
+  $n$-gram lookup     & $\approx 0$              & task-dependent & \xmark \\
+  \bottomrule
+  \end{tabular}
+  \end{table}
+
+  \textbf{EAGLE.} Drafts from the verifier's hidden states instead of from text $\implies$ high $\alpha$
+  for one extra layer. Proposes a \emph{tree} of continuations, verified in one pass.
+
+  \textbf{Diffusion.} All $\gamma$ tokens in a single bidirectional pass: $\gamma T_d \to T_d$, so the
+  term that created the interior optimum in $\gamma$ disappears.
+\end{frame}
+
+\begin{frame}[standout]
+  Quantization \\ \small How to get even faster, at a cost
+\end{frame}
+
+\begin{frame}{Quantization}
+  Quantization is a \textit{lossy} speed-up technique: we perform matrix multiplications in lower precision. 
+
+  \textbf{Quantization does not always increase throughput.} Some formats are supported by dedicated 
+  tensor cores on GPU, only these are performed faster. 
+  Else: very nuanced, faster memory transfer but slower execution (due to dequantization overhead).
+  \begin{table}[htbp]
+\centering
+\caption{Quantization kernel support by NVIDIA GPU architecture}
+\label{tab:quant-support}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Architecture} & \textbf{INT8} & \textbf{FP8} & \textbf{FP4} \\
+\midrule
+Ampere    & \cmark & \xmark & \xmark \\
+Hopper    & \cmark & \cmark & \xmark \\
+Blackwell & (\cmark) & \cmark & \cmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+\end{frame}
+
+
+
+\begin{frame}{RTN: Uniform Affine Quantization}
+  We approximate a float vector by \textbf{integers times a float scale}: $\hat{w} = s\,(w^{\text{int}} - z)$.
+
+  \textbf{Asymmetric} (scale $s$, zero point $z$), grid spans $[\min w, \max w]$:
+  \[
+    s = \frac{\max(w) - \min(w)}{2^b - 1},
+    \quad
+    z = \left\lfloor -\frac{\min(w)}{s} \right\rceil,
+    \quad
+    w^{\text{int}} = \mathrm{clamp}\!\left(\left\lfloor \frac{w}{s} \right\rceil + z,\ 0,\ 2^b-1\right)
+  \]
+
+  \textbf{Symmetric} drops $z$, grid is centred on zero:
+  \[
+    s = \frac{\max |w|}{2^{b-1}-1},
+    \qquad
+    w^{\text{int}} = \mathrm{clamp}\!\left(\left\lfloor \frac{w}{s} \right\rceil,\ -2^{b-1},\ 2^{b-1}-1\right)
+  \]
+
+  \textbf{Round-to-nearest} = do exactly this, no data, no search. One pass over the checkpoint.
+
+  Two error sources, traded against each other by $s$: \hl{rounding} error $\leq s/2$ per weight, and
+  \hl{clipping} error for everything outside the grid. A single outlier inflates $s$ and thereby
+  degrades \emph{every} weight sharing it.
+\end{frame}
+
+\begin{frame}{Granularity: What Shares a Scale}
+  The only real knob in RTN is how large a group shares one $(s, z)$.
+
+  \vspace{-0.2em}
+  \begin{table}
+  \centering
+  \footnotesize
+  \begin{tabular}{lccc}
+  \toprule
+  \textbf{granularity} & \textbf{scales/matrix} & \textbf{extra bits/weight} & \textbf{robustness} \\
+  \midrule
+  per-tensor            & $1$                   & $\approx 0$        & worst \\
+  per-channel (per row) & $d_{\text{out}}$      & $\approx 0$        & better \\
+  group-$g$ ($g{=}128$) & $d_{\text{out}} d_{\text{in}} / g$ & $32/g = 0.25$ & best \\
+  \bottomrule
+  \end{tabular}
+  \end{table}
+  \vspace{-0.2em}
+
+  \textbf{Effective bits} $= b + 32/g$ (fp16 scale $+$ zero point per group): 4-bit group-128
+  really costs $4.25$ bit/weight.
+
+  \textbf{Empirically.} 8 bit is free at any granularity. 4 bit \emph{needs} groups: per-tensor is
+  broken, group-128 is within a few percent. 3 bit is the edge, 2 bit is gone.
+
+  $\implies$ every production 4-bit format (AWQ, GPTQ, NF4) is group-wise.
+\end{frame}
+
+\begin{frame}{Dequantization: Where the Integers Turn Back Into Floats}
+  Storing $w^{\text{int}}$ is only half the story --- the matmul has to consume it somehow.
+
+  \textbf{W4A16 (AWQ, GPTQ).} Weights 4-bit in HBM, activations fp16. No 4-bit tensor core exists,
+  so the kernel \hl{dequantizes in registers} and multiplies in fp16:
+  \[
+    y = x \hat{W}^{\mathsf{T}}, \qquad \hat{W} = s \odot (W^{\text{int}} - z) \ \text{unpacked on the fly}
+  \]
+  Win: $4\times$ fewer weight bytes. Cost: unpack $+$ scale per weight, every matmul, every step.
+
+  \textbf{W8A8 (INT8, FP8).} Both operands low precision $\implies$ the tensor core does the matmul
+  natively; dequantization is one multiply on the \emph{output}, not on the weights.
+
+  \textbf{Roofline consequence.} W4A16 lifts decode AI from $1$ to $\approx 4$ FLOP/byte and adds
+  dequant work. Batch 1: near-$4\times$. Large batch: frequently \emph{slower} than bf16.
+\end{frame}
+
+\begin{frame}{Accumulation}
+  A MAC array loads accumulators with the bias and adds products of the loaded operands:
+  \[
+    \hat{A}_n = \hat{b}_n + \sum_m \hat{W}_{n,m}\, \hat{x}_m
+    = \hat{b}_n + \sum_m \left(s_w W^{\text{int}}_{n,m}\right)\!\left(s_x x^{\text{int}}_m\right)
+    = \hat{b}_n + \hl{$s_w s_x$} \sum_m W^{\text{int}}_{n,m} x^{\text{int}}_m
+  \]
+  The scales \textbf{factor out of the sum} $\implies$ the inner loop is pure integer arithmetic.
+
+  \textbf{With zero points} the cross terms do not vanish:
+  \[
+    \sum_m (W^{\text{int}}_{n,m} - z_w)(x^{\text{int}}_m - z_x)
+    = \sum_m W^{\text{int}}_{n,m} x^{\text{int}}_m
+    - z_w \!\underbrace{\sum_m x^{\text{int}}_m}_{\text{runtime}}
+    - z_x \!\underbrace{\sum_m W^{\text{int}}_{n,m}}_{\text{offline}}
+    + \underbrace{d_{\text{in}} z_w z_x}_{\text{offline}}
+  \]
+  $\implies$ symmetric weights ($z_w = 0$) kill the one term that costs anything at runtime. This is why
+  weight quantization in practice is symmetric even though it wastes a level.
+\end{frame}
+
+\begin{frame}{Accumulator Width and Requantization}
+  \textbf{Products do not fit.} INT8 $\times$ INT8 needs $16$ bit; summing $d_{\text{in}}$ of them needs
+  $16 + \lceil \log_2 d_{\text{in}} \rceil$ bit --- for $d = 2560$ that is $28$ bit $\Rightarrow$ INT32.
+  Overflow is silent, so accumulators are always wider: INT8$\to$INT32, FP8$\to$FP32, fp16$\to$fp32.
+
+  \textbf{Requantization.} The INT32 accumulator must become an INT8 activation before the next layer,
+  or you gained nothing on bandwidth:
+  \[
+    x^{\text{int}}_{\text{next}} = \mathrm{clamp}\!\left(\left\lfloor \frac{s_w s_x}{s_y} A^{\text{int}}_n \right\rceil + z_y,\ 0,\ 255\right)
+  \]
+  with $s_y$ from activation calibration. Fusing this into the matmul epilogue is what makes W8A8 fast.
+
+  \textbf{Why W8A8 is not group-wise.} Group scales break the factorization: $s_w$ varies \emph{inside}
+  the sum, so the accumulator must be split per group and rescaled. Group-128 therefore lives in
+  W4A16, where you dequantize anyway.
+\end{frame}
+
+\begin{frame}{GPTQ: Rounding Is the Wrong Objective}
+  RTN minimizes \emph{weight} error $\|W - \hat{W}\|$. What we actually care about is \emph{layer output}
+  error on real data. With calibration activations $X \in \mathbb{R}^{d_{\text{in}} \times N}$:
+  \[
+    \boxed{\ \hat{W}^\ast = \arg\min_{\hat{W}} \ \big\| W X - \hat{W} X \big\|_2^2 \ }
+  \]
+  Separable across output \emph{rows} $\implies$ solve each row independently. \emph{Not} separable
+  across input columns: a direction $X$ excites often deserves a smaller error. That coupling is
+  exactly what RTN throws away.
+
+  \textbf{Key quantity.} The Hessian w.r.t.\ one row is the input covariance
+  $H = 2 X X^{\mathsf{T}} \in \mathbb{R}^{d_{\text{in}} \times d_{\text{in}}}$ --- one forward pass over
+  $\approx 128$ calibration sequences, accumulated per layer.
+\end{frame}
+
+\begin{frame}{GPTQ: The Update}
+  Quantize columns left to right. Having fixed column $q$ to its grid value, the \textbf{optimal
+  correction} to the remaining (still-unquantized) columns $F$ is the OBS update:
+  \[
+    e_q = \frac{w_q - \mathrm{quant}(w_q)}{[H_F^{-1}]_{qq}},
+    \qquad
+    \delta_F = -\,e_q \cdot \big(H_F^{-1}\big)_{q,\,F}
+  \]
+  $\implies$ every rounding error is \hl{immediately compensated} by nudging weights we have not
+  committed to yet. Errors get absorbed instead of accumulating.
+
+  \textbf{Why it is tractable.} OBQ uses a per-row greedy order and re-inverts $H$ each step:
+  $\mathcal{O}(d_{\text{in}}^4)$ per row. GPTQ fixes \emph{one} column order for all rows $\implies$ a
+  single Cholesky of $H^{-1}$, all rows updated as one matrix op.
+
+  \textbf{Practicalities.} Damping $H \leftarrow H + \lambda \bar{d} I$ ($\lambda \approx 1\%$), else the
+  Cholesky fails. \emph{Act-order}: columns by descending $H_{qq}$, so sensitive ones are quantized
+  while correction budget remains. Lazy block updates ($128$ columns) to stay compute-bound.
+\end{frame}
+
+\begin{frame}{Where This Lands}
+  \begin{table}
+  \centering
+  \small
+  \begin{tabular}{lcccc}
+  \toprule
+  & \textbf{data} & \textbf{cost} & \textbf{3--4 bit} & \textbf{8 bit} \\
+  \midrule
+  RTN   & none                & seconds                     & breaks       & fine \\
+  GPTQ  & $\approx 128$ seqs  & minutes--hours, $\mathcal{O}(d^3)$/layer & good & fine \\
+  AWQ   & $\approx 128$ seqs  & minutes                     & good         & fine \\
+  \bottomrule
+  \end{tabular}
+  \end{table}
+
+  \textbf{AWQ, in one line.} Instead of correcting rounding errors, \emph{rescale} channels before
+  rounding: $\hat{W} = Q(W \cdot \mathrm{diag}(\alpha))$, $\hat{x} = \mathrm{diag}(\alpha)^{-1} x$,
+  with $\alpha$ chosen from activation magnitudes so salient channels land on a finer effective grid.
+  Mathematically free at inference --- $\alpha$ folds into the previous layer.
+
+  \vspace{0.3em}
+  $\implies$ all three are \emph{indistinguishable} at 8 bit. They only separate in the 3--4 bit range,
+  which is precisely where a $2\times$ over FP8 is on the table.
+\end{frame}
+
+% ---------------------------------------------------------------------------
+% Content sections go here, e.g.:
+%   \section{Introduction}
+%   \input{sections/01-introduction}
+% ---------------------------------------------------------------------------
+
+\appendix
+
+\begin{frame}[standout]
+  Questions?
+\end{frame}
+
+\end{document}

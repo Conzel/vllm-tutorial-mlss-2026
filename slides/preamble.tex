@@ -1,0 +1,119 @@
+% ---------------------------------------------------------------------------
+% Theme
+% ---------------------------------------------------------------------------
+\usetheme[
+  progressbar=frametitle,
+  numbering=fraction,
+  block=fill,
+  sectionpage=progressbar,
+  subsectionpage=none,
+]{metropolis}
+
+% ---------------------------------------------------------------------------
+% Fonts (requires lualatex or xelatex)
+% ---------------------------------------------------------------------------
+\usepackage{fontspec}
+\setsansfont{Fira Sans}[
+  UprightFont = *-Book,
+  ItalicFont  = *-BookItalic,
+  BoldFont    = *-SemiBold,
+]
+\setmonofont{Fira Mono}[Scale=MatchLowercase]
+\usepackage{unicode-math}
+\setmathfont{Fira Math}[Scale=MatchLowercase]
+
+\usepackage[english]{babel}
+\usepackage{csquotes}
+
+% ---------------------------------------------------------------------------
+% Colors
+% ---------------------------------------------------------------------------
+\usepackage{xcolor}
+\definecolor{accent}{HTML}{2B7A9B}      % teal   - primary accent
+\definecolor{accentalt}{HTML}{E8743B}   % orange - secondary / highlights
+\definecolor{ink}{HTML}{23373B}         % near-black text
+\definecolor{paper}{HTML}{FAFAFA}       % off-white background
+
+\setbeamercolor{normal text}{fg=ink, bg=paper}
+\setbeamercolor{alerted text}{fg=accentalt}
+\setbeamercolor{example text}{fg=accent}
+\setbeamercolor{progress bar}{fg=accent}
+\setbeamercolor{title separator}{fg=accent}
+\setbeamercolor{progress bar in head/foot}{fg=accent}
+\setbeamercolor{progress bar in section page}{fg=accent}
+\setbeamercolor{frametitle}{bg=ink, fg=paper}
+
+% ---------------------------------------------------------------------------
+% Packages
+% ---------------------------------------------------------------------------
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{amssymb}
+\usepackage{pifont}
+\newcommand{\cmark}{\ding{51}}
+\newcommand{\xmark}{\ding{55}}
+\graphicspath{{figures/}}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, calc, fit, backgrounds, decorations.pathreplacing}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{appendixnumberbeamer}
+\usepackage{fontawesome5}
+
+% ---------------------------------------------------------------------------
+% Code listings
+% ---------------------------------------------------------------------------
+\usepackage{listings}
+\definecolor{codebg}{HTML}{F2F2F0}
+\definecolor{codekw}{HTML}{2B7A9B}
+\definecolor{codestr}{HTML}{6A8E3B}
+\definecolor{codecom}{HTML}{9A9A9A}
+
+\lstdefinestyle{talk}{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{codekw}\bfseries,
+  stringstyle=\color{codestr},
+  commentstyle=\color{codecom}\itshape,
+  numberstyle=\ttfamily\scriptsize\color{codecom},
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=true,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=none,
+  xleftmargin=6pt,
+  xrightmargin=6pt,
+  framexleftmargin=6pt,
+  framexrightmargin=6pt,
+  aboveskip=1em,
+  belowskip=1em,
+  upquote=true,
+  escapeinside={(*@}{@*)},
+}
+\lstset{style=talk, language=Python}
+
+\lstnewenvironment{pycode}[1][]{\lstset{language=Python,#1}}{}
+\lstnewenvironment{shcode}[1][]{\lstset{language=bash,#1}}{}
+\newcommand{\py}[1]{\lstinline[language=Python]|#1|}
+
+% ---------------------------------------------------------------------------
+% Small conveniences
+% ---------------------------------------------------------------------------
+\newcommand{\hl}[1]{\textcolor{accentalt}{\textbf{#1}}}
+
+% Tighter, nicer lists
+\setbeamertemplate{itemize items}[circle]
+\setbeamertemplate{itemize subitem}[triangle]
+
+% Frame with a full-bleed image background:
+%   \fullimageframe{myfigure}{Optional caption}
+\newcommand{\fullimageframe}[2]{%
+  \begin{frame}[plain]
+    \begin{tikzpicture}[remember picture, overlay]
+      \node[at=(current page.center)] {%
+        \includegraphics[width=\paperwidth, height=\paperheight, keepaspectratio]{#1}};
+    \end{tikzpicture}
+    \ifx\relax#2\relax\else\vfill{\small #2}\fi
+  \end{frame}%
+}
